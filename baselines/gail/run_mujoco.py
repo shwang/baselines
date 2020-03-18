@@ -8,6 +8,7 @@ import logging
 from mpi4py import MPI
 from tqdm import tqdm
 
+import benchmark_environments.classic_control
 import numpy as np
 import gym
 
@@ -138,6 +139,7 @@ def train(env, seed, policy_fn, reward_giver, dataset, algo,
         workerseed = seed + 10000 * MPI.COMM_WORLD.Get_rank()
         set_global_seeds(workerseed)
         env.seed(workerseed)
+        logger.configure(log_dir, 'stdout,csv,tensorboard'.split(','))
         trpo_mpi.learn(env, policy_fn, reward_giver, dataset, rank,
                        pretrained=pretrained, pretrained_weight=pretrained_weight,
                        g_step=g_step, d_step=d_step,

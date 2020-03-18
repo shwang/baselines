@@ -23,8 +23,8 @@ class Dset(object):
         if self.randomize:
             idx = np.arange(self.num_pairs)
             np.random.shuffle(idx)
-            self.inputs = self.inputs[idx, :]
-            self.labels = self.labels[idx, :]
+            self.inputs = self.inputs[idx, ...]
+            self.labels = self.labels[idx, ...]
 
     def get_next_batch(self, batch_size):
         # if batch_size is negative -> return all
@@ -33,15 +33,15 @@ class Dset(object):
         if self.pointer + batch_size >= self.num_pairs:
             self.init_pointer()
         end = self.pointer + batch_size
-        inputs = self.inputs[self.pointer:end, :]
-        labels = self.labels[self.pointer:end, :]
+        inputs = self.inputs[self.pointer:end, ...]
+        labels = self.labels[self.pointer:end, ...]
         self.pointer = end
         return inputs, labels
 
 
 class Mujoco_Dset(object):
     def __init__(self, expert_path, train_fraction=0.7, traj_limitation=-1, randomize=True):
-        traj_data = np.load(expert_path)
+        traj_data = np.load(expert_path, allow_pickle=True)
         if traj_limitation < 0:
             traj_limitation = len(traj_data['obs'])
         obs = traj_data['obs'][:traj_limitation]
@@ -49,7 +49,7 @@ class Mujoco_Dset(object):
 
         # obs, acs: shape (N, L, ) + S where N = # episodes, L = episode length
         # and S is the environment observation/action space.
-        # Flatten to (N * L, prod(S))
+        # Flatten to (N * L, prod(S)) if necessary
         if len(obs.shape) > 2:
             self.obs = np.reshape(obs, [-1, np.prod(obs.shape[2:])])
             self.acs = np.reshape(acs, [-1, np.prod(acs.shape[2:])])
@@ -57,7 +57,10 @@ class Mujoco_Dset(object):
             self.obs = np.vstack(obs)
             self.acs = np.vstack(acs)
 
-        self.rets = traj_data['ep_rets'][:traj_limitation]
+        if 'ep_rets' in traj_data:
+            self.rets = traj_data['ep_rets'][:traj_limitation]
+        else:
+            self.rets = [0] * len(obs)
         self.avg_ret = sum(self.rets)/len(self.rets)
         self.std_ret = np.std(np.array(self.rets))
         if len(self.acs) > 2:
@@ -68,11 +71,11 @@ class Mujoco_Dset(object):
         self.randomize = randomize
         self.dset = Dset(self.obs, self.acs, self.randomize)
         # for behavior cloning
-        self.train_set = Dset(self.obs[:int(self.num_transition*train_fraction), :],
-                              self.acs[:int(self.num_transition*train_fraction), :],
+        self.train_set = Dset(self.obs[:int(self.num_transition*train_fraction), ...],
+                              self.acs[:int(self.num_transition*train_fraction), ...],
                               self.randomize)
-        self.val_set = Dset(self.obs[int(self.num_transition*train_fraction):, :],
-                            self.acs[int(self.num_transition*train_fraction):, :],
+        self.val_set = Dset(self.obs[int(self.num_transition*train_fraction):, ...],
+                            self.acs[int(self.num_transition*train_fraction):, ...],
                             self.randomize)
         self.log_info()
 
@@ -107,8 +110,8 @@ def test(expert_path, traj_limitation, plot):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--expert_path", type=str, default="../data/deterministic.trpo.Hopper.0.00.npz")
-    parser.add_argument("--traj_limitation", type=int, default=None)
+    parser.add_argument("--expert_path", type=str, default="data/deterministic.trpo.Hopper.0.00.npz")
+    parser.add_argument("--traj_limitation", type=int, default=-1)
     parser.add_argument("--plot", type=bool, default=False)
     args = parser.parse_args()
     test(args.expert_path, args.traj_limitation, args.plot)

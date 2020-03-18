@@ -17,21 +17,77 @@ def logit_bernoulli_entropy(logits):
     ent = (1.-tf.nn.sigmoid(logits))*logits - logsigmoid(logits)
     return ent
 
+
+from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete
+
+def observation_input(ob_space, name='Ob', batch_size=None, scale=False):
+    """
+    Build observation input with encoding depending on the observation space type
+
+    When using Box ob_space, the input will be normalized between [1, 0] on the bounds ob_space.low and ob_space.high.
+
+    :param ob_space: (Gym Space) The observation space
+    :param name: (str) tensorflow variable name for input placeholder
+    :param scale: (bool) whether or not to scale the input
+    :return: (TensorFlow Tensor, TensorFlow Tensor) input_placeholder, processed_input_tensor
+    """
+    if isinstance(ob_space, Discrete):
+        observation_ph = tf.placeholder(shape=(batch_size,), dtype=tf.int32, name=name)
+        processed_observations = tf.cast(tf.one_hot(observation_ph, ob_space.n), tf.float32)
+        return observation_ph, processed_observations
+
+    elif isinstance(ob_space, Box):
+        observation_ph = tf.placeholder(shape=(batch_size,) +ob_space.shape, dtype=ob_space.dtype, name=name)
+        processed_observations = tf.cast(observation_ph, tf.float32)
+        # rescale to [1, 0] if the bounds are defined
+        if (scale and
+           not np.any(np.isinf(ob_space.low)) and not np.any(np.isinf(ob_space.high)) and
+           np.any((ob_space.high - ob_space.low) != 0)):
+
+            # equivalent to processed_observations / 255.0 when bounds are set to [255, 0]
+            processed_observations = ((processed_observations - ob_space.low) / (ob_space.high - ob_space.low))
+        return observation_ph, processed_observations
+
+    elif isinstance(ob_space, MultiBinary):
+        observation_ph = tf.placeholder(shape=(ob_space.n,), dtype=tf.int32, name=name)
+        processed_observations = tf.cast(observation_ph, tf.float32)
+        processed_observations = tf.expand_dims(processed_observations, axis=0)
+        return observation_ph, processed_observations
+
+    elif isinstance(ob_space, MultiDiscrete):
+        observation_ph = tf.placeholder(shape=(len(ob_space.nvec),), dtype=tf.int32, name=name)
+        processed_observations = tf.expand_dims(observation_ph, axis=0)
+        processed_observations = tf.concat([
+            tf.cast(tf.one_hot(input_split, ob_space.nvec[i]), tf.float32) for i, input_split
+            in enumerate(tf.split(processed_observations, len(ob_space.nvec), axis=-1))
+        ], axis=-1)
+        return observation_ph, processed_observations
+
+    else:
+        raise NotImplementedError("Error: the model does not support input space of type {}".format(
+            type(ob_space).__name__))
+
+
 class TransitionClassifier(object):
     def __init__(self, env, hidden_size, entcoeff=0.001, lr_rate=1e-3, scope="adversary"):
         self.scope = scope
         self.observation_shape = env.observation_space.shape
         self.actions_shape = env.action_space.shape
         self.input_shape = tuple([o+a for o, a in zip(self.observation_shape, self.actions_shape)])
-        self.num_actions = env.action_space.shape[0]
         self.hidden_size = hidden_size
-        self.build_ph()
-        # Build grpah
-        generator_logits = self.build_graph(self.generator_obs_ph, self.generator_acs_ph, reuse=False)
-        expert_logits = self.build_graph(self.expert_obs_ph, self.expert_acs_ph, reuse=True)
+
+        # Build graph
+        self.generator_obs_ph, generator_obs = observation_input(env.observation_space, name="generator_obs")
+        self.generator_acs_ph, generator_acs = observation_input(env.action_space, name="generator_actions")
+        self.expert_obs_ph, expert_obs = observation_input(env.observation_space, name="expert_obs")
+        self.expert_acs_ph, expert_acs = observation_input(env.action_space, name="expert_actions")
+        generator_logits = self.build_graph(generator_obs, generator_acs, reuse=False)
+        expert_logits = self.build_graph(expert_obs, expert_acs, reuse=True)
+
         # Build accuracy
         generator_acc = tf.reduce_mean(tf.to_float(tf.nn.sigmoid(generator_logits) < 0.5))
         expert_acc = tf.reduce_mean(tf.to_float(tf.nn.sigmoid(expert_logits) > 0.5))
+
         # Build regression loss
         # let x = logits, z = targets.
         # z * -log(sigmoid(x)) + (1 - z) * -log(1 - sigmoid(x))
@@ -39,25 +95,22 @@ class TransitionClassifier(object):
         generator_loss = tf.reduce_mean(generator_loss)
         expert_loss = tf.nn.sigmoid_cross_entropy_with_logits(logits=expert_logits, labels=tf.ones_like(expert_logits))
         expert_loss = tf.reduce_mean(expert_loss)
+
         # Build entropy loss
         logits = tf.concat([generator_logits, expert_logits], 0)
         entropy = tf.reduce_mean(logit_bernoulli_entropy(logits))
         entropy_loss = -entcoeff*entropy
+
         # Loss + Accuracy terms
         self.losses = [generator_loss, expert_loss, entropy, entropy_loss, generator_acc, expert_acc]
         self.loss_name = ["generator_loss", "expert_loss", "entropy", "entropy_loss", "generator_acc", "expert_acc"]
         self.total_loss = generator_loss + expert_loss + entropy_loss
+
         # Build Reward for policy
         self.reward_op = -tf.log(1-tf.nn.sigmoid(generator_logits)+1e-8)
         var_list = self.get_trainable_variables()
         self.lossandgrad = U.function([self.generator_obs_ph, self.generator_acs_ph, self.expert_obs_ph, self.expert_acs_ph],
-                                      self.losses + [U.flatgrad(self.total_loss, var_list)])
-
-    def build_ph(self):
-        self.generator_obs_ph = tf.placeholder(tf.float32, (None, ) + self.observation_shape, name="observations_ph")
-        self.generator_acs_ph = tf.placeholder(tf.float32, (None, ) + self.actions_shape, name="actions_ph")
-        self.expert_obs_ph = tf.placeholder(tf.float32, (None, ) + self.observation_shape, name="expert_observations_ph")
-        self.expert_acs_ph = tf.placeholder(tf.float32, (None, ) + self.actions_shape, name="expert_actions_ph")
+                                       self.losses + [U.flatgrad(self.total_loss, var_list)])
 
     def build_graph(self, obs_ph, acs_ph, reuse=False):
         with tf.variable_scope(self.scope):
@@ -78,10 +131,6 @@ class TransitionClassifier(object):
 
     def get_reward(self, obs, acs):
         sess = tf.get_default_session()
-        if len(obs.shape) == 1:
-            obs = np.expand_dims(obs, 0)
-        if len(acs.shape) == 1:
-            acs = np.expand_dims(acs, 0)
         feed_dict = {self.generator_obs_ph: obs, self.generator_acs_ph: acs}
         reward = sess.run(self.reward_op, feed_dict)
         return reward

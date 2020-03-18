@@ -69,7 +69,8 @@ def traj_segment_generator(pi, env, reward_giver, horizon, stochastic):
         acs[i] = ac
         prevacs[i] = prevac
 
-        rew = reward_giver.get_reward(ob, ac)
+        rew = reward_giver.get_reward(np.expand_dims(ob, 0), np.expand_dims(ac, 0))
+
         ob, true_rew, new, _ = env.step(ac)
         rews[i] = rew
         true_rews[i] = true_rew
@@ -148,7 +149,6 @@ def learn(env, policy_func, reward_giver, expert_dataset, rank,
     all_var_list = pi.get_trainable_variables()
     var_list = [v for v in all_var_list if v.name.startswith("pi/pol") or v.name.startswith("pi/logstd")]
     vf_var_list = [v for v in all_var_list if v.name.startswith("pi/vff")]
-    assert len(var_list) == len(vf_var_list) + 1
     d_adam = MpiAdam(reward_giver.get_trainable_variables())
     vfadam = MpiAdam(vf_var_list)
 
@@ -325,6 +325,8 @@ def learn(env, policy_func, reward_giver, expert_dataset, rank,
             *newlosses, g = reward_giver.lossandgrad(ob_batch, ac_batch, ob_expert, ac_expert)
             d_adam.update(allmean(g), d_stepsize)
             d_losses.append(newlosses)
+            for loss_name, loss in zip(reward_giver.loss_name, newlosses):
+                logger.logkv_mean("disc/" + loss_name, loss)
         logger.log(fmt_row(13, np.mean(d_losses, axis=0)))
 
         lrlocal = (seg["ep_lens"], seg["ep_rets"], seg["ep_true_rets"])  # local values
